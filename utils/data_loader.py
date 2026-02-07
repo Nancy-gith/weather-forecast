@@ -308,12 +308,34 @@ class WeatherDataLoader:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
         
+        # Try fetching data with increasing search radius
         location = Point(city_info['lat'], city_info['lon'])
+        
+        # First attempt: Default radius
         data = Daily(location, start_date, end_date)
         df = data.fetch()
         
+        # Second attempt: Expand radius to find nearby stations
         if df.empty:
-            raise ValueError(f"No historical data available for {city_name}")
+            # Try with expanded radius (within ~100km)
+            for lat_offset in [0.5, -0.5, 1.0, -1.0]:
+                for lon_offset in [0.5, -0.5, 1.0, -1.0]:
+                    nearby_location = Point(
+                        city_info['lat'] + lat_offset,
+                        city_info['lon'] + lon_offset
+                    )
+                    data = Daily(nearby_location, start_date, end_date)
+                    df = data.fetch()
+                    if not df.empty:
+                        # Found data at nearby location!
+                        break
+                if not df.empty:
+                    break
+        
+        # Third attempt: Generate synthetic data if still no data found
+        if df.empty:
+            st.warning(f"⚠️ No weather station data available for {city_name}. Generating estimated data based on regional climate.")
+            df = _self._generate_synthetic_data(city_name, start_date, end_date)
         
         # Save to cache
         df.reset_index(inplace=True)
@@ -322,6 +344,136 @@ class WeatherDataLoader:
         
         df.set_index('date', inplace=True)
         return df
+    
+    def _generate_synthetic_data(self, city_name: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """
+        Generate realistic synthetic weather data for cities without weather stations.
+        Based on regional climate patterns, elevation, and seasons.
+        """
+        import random
+        import numpy as np
+        
+        city_info = WeatherDataLoader.get_city_info(city_name)
+        lat = city_info['lat']
+        city_key = city_name.lower().replace(' ', '')
+        
+        # Hill stations and elevated cities (much cooler than plains)
+        hill_stations = {
+            'shimla', 'manali', 'kullu', 'dalhousie', 'dharamshala', 'mcleodganj',
+            'dehradun', 'mussoorie', 'nainital', 'almora', 'ranikhet',
+            'ooty', 'kodaikanal', 'munnar', 'darjeeling', 'gangtok',
+            'shillong', 'cherrapunji', 'mawsynram', 'tawang', 'aizawl',
+            'mahabaleshwar', 'lonavala', 'panchgani', 'coorg', 'wayanad',
+            'gulmarg', 'pahalgam', 'sonamarg', 'leh', 'kargil',
+            'spitivalley', 'keylong', 'auli', 'kedarnath', 'badrinath',
+            'sandakphu', 'yumthangvalley'
+        }
+        
+        # Coastal cities (moderate temperature, high humidity)
+        coastal_cities = {
+            'mumbai', 'goa', 'kochi', 'thiruvananthapuram', 'kozhikode',
+            'mangalore', 'udupi', 'karwar', 'ratnagiri', 'alibag',
+            'chennai', 'visakhapatnam', 'puducherry', 'mahabalipuram',
+            'portblair', 'panjim', 'vasco', 'margao'
+        }
+        
+        # Desert/hot regions
+        hot_dry_cities = {
+            'jaisalmer', 'bikaner', 'jodhpur', 'ajmer', 'udaipur',
+            'ahmedabad', 'rajkot', 'surat', 'vadodara'
+        }
+        
+        # Determine climate zone
+        if city_key in hill_stations or 'hill' in city_key or 'ganj' in city_key:
+            # Hill stations: Cool year-round
+            if lat > 32:  # High altitude (Leh, Kargil)
+                base_temp = 10
+                temp_variation = 12
+            elif lat > 28:  # Medium altitude (Shimla, Dehradun)
+                base_temp = 18
+                temp_variation = 10
+            else:  # Southern hills (Ooty, Munnar)
+                base_temp = 20
+                temp_variation = 6
+        elif city_key in coastal_cities:
+            # Coastal: Moderate, less variation
+            base_temp = 28
+            temp_variation = 4
+        elif city_key in hot_dry_cities:
+            # Desert/hot: Very hot in summer
+            base_temp = 32
+            temp_variation = 14
+        else:
+            # Regular cities by latitude
+            if lat > 30:  # Northern regions
+                base_temp = 15
+                temp_variation = 15
+            elif lat > 25:  # Northern plains
+                base_temp = 25
+                temp_variation = 12
+            elif lat > 20:  # Central India
+                base_temp = 28
+                temp_variation = 8
+            elif lat > 15:  # South Central
+                base_temp = 27
+                temp_variation = 6
+            else:  # Deep South
+                base_temp = 28
+                temp_variation = 5
+        
+        # Generate dates
+        dates = pd.date_range(start=start_date, end=end_date, freq='D')
+        num_days = len(dates)
+        
+        # Generate realistic temperature with seasonal variation
+        day_of_year = np.array([d.timetuple().tm_yday for d in dates])
+        
+        # Seasonal cycle (peaks in summer around day 150-180)
+        seasonal_factor = np.sin(2 * np.pi * (day_of_year - 80) / 365)
+        
+        # Base temperature with seasonality
+        tavg = base_temp + seasonal_factor * temp_variation + np.random.normal(0, 2, num_days)
+        tmax = tavg + np.random.uniform(3, 7, num_days)
+        tmin = tavg - np.random.uniform(3, 7, num_days)
+        
+        # Generate precipitation (monsoon-aware)
+        month = np.array([d.month for d in dates])
+        
+        # Different monsoon patterns
+        if city_key in ['cherrapunji', 'mawsynram']:  # Wettest places
+            monsoon_factor = np.where((month >= 6) & (month <= 9), 3.0, 0.5)
+        elif city_key in coastal_cities or lat < 20:  # Coastal/South
+            monsoon_factor = np.where((month >= 6) & (month <= 9), 1.5, 0.3)
+        else:  # Regular cities
+            monsoon_factor = np.where((month >= 6) & (month <= 9), 1.0, 0.2)
+        
+        prcp = np.random.exponential(5, num_days) * monsoon_factor
+        prcp = np.clip(prcp, 0, 150)  # Realistic limits
+        
+        # Generate other weather parameters
+        wspd = np.random.uniform(5, 25, num_days)
+        
+        # Pressure varies with elevation (approximate)
+        if city_key in hill_stations:
+            base_pressure = 950  # Lower at elevation
+        else:
+            base_pressure = 1013  # Sea level
+        pres = np.random.normal(base_pressure, 5, num_days)
+        
+        # Create DataFrame
+        df = pd.DataFrame({
+            'time': dates,
+            'tavg': tavg.round(1),
+            'tmin': tmin.round(1),
+            'tmax': tmax.round(1),
+            'prcp': prcp.round(1),
+            'wspd': wspd.round(1),
+            'pres': pres.round(1)
+        })
+        
+        df.set_index('time', inplace=True)
+        return df
+
     
     @staticmethod
     def get_weather_emoji(icon_code: str) -> str:
