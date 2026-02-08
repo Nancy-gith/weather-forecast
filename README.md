@@ -1,6 +1,6 @@
 # 🌦️ Weather Forecast Web Application – India 🇮🇳
 
-🔗 **Live Web App:** 👉 https://YOUR-DEPLOYED-LINK-HERE
+🔗 **Live Web App:** 👉 https://weather-forecast-kxets7dw7tyj87zasgvyum.streamlit.app/Dashboard
 
 A real-time, interactive weather dashboard focused on Indian cities, combining live weather data, historical analysis, and educational machine learning forecasting models.
 
